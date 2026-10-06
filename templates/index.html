@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Customer Support Ticket Classifier</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <p class="eyebrow">Machine Learning · Flask</p>
+      <h1>Customer Support Ticket Classifier</h1>
+      <p class="subtitle">
+        Paste a customer message below. The trained TF-IDF + Logistic Regression
+        model predicts the ticket type.
+      </p>
+    </header>
+
+    <main class="card">
+      <form method="POST" action="/" class="predict-form">
+        <label for="message">Ticket description</label>
+        <textarea
+          id="message"
+          name="message"
+          rows="7"
+          placeholder="Example: I was charged twice for my monthly subscription. Please check my invoice."
+          required
+        >{{ message }}</textarea>
+
+        <div class="actions">
+          <button type="submit">Classify ticket</button>
+          <button type="button" id="fill-example" class="secondary">Use example</button>
+        </div>
+      </form>
+
+      {% if result %}
+        <section class="result" aria-live="polite">
+          {% if result.error %}
+            <p class="error">{{ result.error }}</p>
+          {% else %}
+            <h2>Prediction</h2>
+            <div class="prediction-box">
+              <span class="label-pill">{{ result.predicted_type }}</span>
+              <p class="confidence">
+                Confidence: <strong>{{ '%.1f'|format(result.confidence * 100) }}%</strong>
+              </p>
+            </div>
+
+            <h3>All class probabilities</h3>
+            <ul class="prob-list">
+              {% for ticket_type, probability in result.probabilities.items() %}
+                <li>
+                  <div class="prob-row">
+                    <span>{{ ticket_type }}</span>
+                    <span>{{ '%.1f'|format(probability * 100) }}%</span>
+                  </div>
+                  <div class="bar">
+                    <div class="bar-fill" style="width: {{ (probability * 100)|round(1) }}%;"></div>
+                  </div>
+                </li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </section>
+      {% endif %}
+    </main>
+
+    <aside class="info card">
+      <h2>Supported ticket types</h2>
+      <ul class="type-list">
+        {% for ticket_type in ticket_types %}
+          <li>{{ ticket_type }}</li>
+        {% endfor %}
+      </ul>
+      <p class="note">
+        Model files loaded from <code>model/tfidf_vectorizer.pkl</code> and
+        <code>model/logistic_regression_model.pkl</code>.
+      </p>
+    </aside>
+  </div>
+
+  <script>
+    document.getElementById("fill-example").addEventListener("click", function () {
+      document.getElementById("message").value =
+        "I was charged twice for my monthly subscription. Please check my invoice.";
+    });
+  </script>
+</body>
+</html>
