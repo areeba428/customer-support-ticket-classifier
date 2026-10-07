@@ -108,6 +108,12 @@ def predict_ticket_type(message: str) -> dict:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+@app.route("/health", methods=["GET"])
+def health():
+    """Used by the Jenkins deploy step to confirm the app is up."""
+    return jsonify({"status": "ok"})
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     """Home page: form to enter a ticket message and see the prediction."""
@@ -146,5 +152,10 @@ def predict_api():
 # Run the app
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # debug=True reloads the app when you edit code (good for learning)
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    # Bind all interfaces so Docker can publish the port.
+    # Set FLASK_DEBUG=1 when you want the reloader while developing.
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "5000")),
+        debug=os.getenv("FLASK_DEBUG", "0") == "1",
+    )

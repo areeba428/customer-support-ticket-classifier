@@ -24,7 +24,10 @@ import re
 import string
 
 import joblib
+import mlflow
+import mlflow.sklearn
 import pandas as pd
+from mlflow.models import infer_signature
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -36,6 +39,8 @@ from sklearn.metrics import (
     recall_score,
 )
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +51,18 @@ DATA_PATH = os.path.join(BASE_DIR, "data", "customer_support_tickets.csv")
 MODEL_DIR = os.path.join(BASE_DIR, "model")
 VECTORIZER_PATH = os.path.join(MODEL_DIR, "tfidf_vectorizer.pkl")
 MODEL_PATH = os.path.join(MODEL_DIR, "logistic_regression_model.pkl")
+MLFLOW_TRACKING_URI = os.getenv(
+    "MLFLOW_TRACKING_URI", f"sqlite:///{os.path.join(BASE_DIR, 'mlflow.db')}"
+)
+MLFLOW_ARTIFACT_LOCATION = os.getenv(
+    "MLFLOW_ARTIFACT_LOCATION", f"file://{os.path.join(BASE_DIR, 'mlartifacts')}"
+)
+MLFLOW_EXPERIMENT_NAME = os.getenv(
+    "MLFLOW_EXPERIMENT_NAME", "customer-support-ticket-classifier"
+)
+MLFLOW_REGISTERED_MODEL_NAME = os.getenv(
+    "MLFLOW_REGISTERED_MODEL_NAME", "customer-support-ticket-classifier"
+)
 
 # Column names we will use (confirmed from the real Kaggle CSV)
 TEXT_COLUMN = "Ticket Description"
@@ -124,6 +141,19 @@ def clean_text(text: str) -> str:
     text = "".join(ch if ch in allowed else " " for ch in text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def clean_messages(messages) -> list[str]:
+    """Clean a batch of raw messages for use inside the registered pipeline."""
+    if isinstance(messages, pd.DataFrame):
+        if TEXT_COLUMN in messages.columns:
+            messages = messages[TEXT_COLUMN]
+        else:
+            messages = messages.iloc[:, 0]
+    elif isinstance(messages, pd.Series):
+        messages = messages.tolist()
+
+    return [clean_text(message) for message in messages]
 
 
 def prepare_dataset(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
@@ -237,7 +267,7 @@ def train_model(X_train_tfidf, y_train) -> LogisticRegression:
 # ---------------------------------------------------------------------------
 # 6. Evaluation
 # ---------------------------------------------------------------------------
-def evaluate_model(model: LogisticRegression, X_test_tfidf, y_test) -> None:
+def evaluate_model(model: LogisticRegression, X_test_tfidf, y_test) -> dict[str, float]:
     """Print accuracy, precision, recall, F1, confusion matrix, and report."""
     print("\n" + "=" * 70)
     print("STEP 6: Evaluate the model")
@@ -277,6 +307,13 @@ def evaluate_model(model: LogisticRegression, X_test_tfidf, y_test) -> None:
 
     print("\n----- Classification Report -----")
     print(classification_report(y_test, y_pred, digits=4, zero_division=0))
+
+    return {
+        "accuracy": accuracy,
+        "weighted_precision": precision,
+        "weighted_recall": recall,
+        "weighted_f1": f1,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +368,75 @@ def save_artifacts(vectorizer: TfidfVectorizer, model: LogisticRegression) -> No
 
 
 # ---------------------------------------------------------------------------
+# 9. Log and register the complete inference pipeline with MLflow
+# ---------------------------------------------------------------------------
+def register_with_mlflow(
+    vectorizer: TfidfVectorizer,
+    model: LogisticRegression,
+    metrics: dict[str, float],
+    training_samples: int,
+) -> None:
+    """Log the full raw-text inference pipeline and register its model version."""
+    print("\n" + "=" * 70)
+    print("STEP 9: Register the model with MLflow")
+    print("=" * 70)
+
+    inference_pipeline = Pipeline(
+        [
+            ("clean_text", FunctionTransformer(clean_messages, validate=False)),
+            ("tfidf", vectorizer),
+            ("classifier", model),
+        ]
+    )
+    input_example = pd.DataFrame(
+        {
+            TEXT_COLUMN: [
+                "I was charged twice for my subscription.",
+                "My laptop screen keeps flickering.",
+            ]
+        }
+    )
+    signature = infer_signature(
+        input_example,
+        inference_pipeline.predict(input_example),
+    )
+
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    if mlflow.get_experiment_by_name(MLFLOW_EXPERIMENT_NAME) is None:
+        mlflow.create_experiment(
+            MLFLOW_EXPERIMENT_NAME, artifact_location=MLFLOW_ARTIFACT_LOCATION
+        )
+    mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+
+    with mlflow.start_run(run_name="logistic-regression-tfidf") as run:
+        mlflow.log_params(
+            {
+                "classifier": "LogisticRegression",
+                "vectorizer": "TfidfVectorizer",
+                "max_features": vectorizer.max_features,
+                "ngram_range": str(vectorizer.ngram_range),
+                "training_samples": training_samples,
+                "classes": len(model.classes_),
+            }
+        )
+        mlflow.log_metrics(metrics)
+        model_info = mlflow.sklearn.log_model(
+            sk_model=inference_pipeline,
+            name="model",
+            serialization_format=mlflow.sklearn.SERIALIZATION_FORMAT_CLOUDPICKLE,
+            registered_model_name=MLFLOW_REGISTERED_MODEL_NAME,
+            signature=signature,
+            input_example=input_example,
+        )
+
+        print(f"Tracking URI          : {MLFLOW_TRACKING_URI}")
+        print(f"Experiment            : {MLFLOW_EXPERIMENT_NAME}")
+        print(f"Run ID                : {run.info.run_id}")
+        print(f"Registered model      : {MLFLOW_REGISTERED_MODEL_NAME}")
+        print(f"Logged model URI      : {model_info.model_uri}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -339,9 +445,10 @@ def main() -> None:
     X_train, X_test, y_train, y_test = split_data(X, y)
     vectorizer, X_train_tfidf, X_test_tfidf = build_tfidf_features(X_train, X_test)
     model = train_model(X_train_tfidf, y_train)
-    evaluate_model(model, X_test_tfidf, y_test)
+    metrics = evaluate_model(model, X_test_tfidf, y_test)
     predict_new_messages(model, vectorizer)
     save_artifacts(vectorizer, model)
+    register_with_mlflow(vectorizer, model, metrics, len(X_train))
 
     print("\n" + "=" * 70)
     print("Done! Training pipeline finished successfully.")
